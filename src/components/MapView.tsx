@@ -44,7 +44,8 @@ interface MapViewProps {
   zoom: number;
   results: SearchResult[];
   selectedResult?: SearchResult | null;
-  station?: TrainStation | null;
+  stations?: TrainStation[];
+  searchRadius?: number; // in kilometers
 }
 
 // Component to update map view when center changes
@@ -63,12 +64,13 @@ export const MapView: React.FC<MapViewProps> = ({
   zoom, 
   results, 
   selectedResult, 
-  station 
+  stations = [],
+  searchRadius = 2
 }) => {
   const mapRef = useRef<L.Map | null>(null);
 
-  // Calculate search radius for circle display
-  const searchRadius = 2000; // Default 2km, should be passed from filters
+  // Convert km to meters for circle display
+  const radiusMeters = searchRadius * 1000;
 
   return (
     <div className="h-full w-full">
@@ -87,24 +89,29 @@ export const MapView: React.FC<MapViewProps> = ({
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
 
-        {/* Search radius circle */}
-        {station && (
+        {/* Search radius circles for each station */}
+        {stations.map((station) => (
           <Circle
+            key={`circle-${station.id}`}
             center={[station.lat, station.lng]}
-            radius={searchRadius}
+            radius={radiusMeters}
             pathOptions={{
               color: '#3b82f6',
               fillColor: '#3b82f6',
-              fillOpacity: 0.1,
-              weight: 2,
+              fillOpacity: 0.05,
+              weight: 1,
               dashArray: '5, 5'
             }}
           />
-        )}
+        ))}
 
-        {/* Train station marker */}
-        {station && (
-          <Marker position={[station.lat, station.lng]} icon={stationIcon}>
+        {/* Train station markers */}
+        {stations.map((station) => (
+          <Marker 
+            key={`station-${station.id}`}
+            position={[station.lat, station.lng]} 
+            icon={stationIcon}
+          >
             <Popup>
               <div className="text-center">
                 <h3 className="font-semibold text-lg text-blue-600">
@@ -117,10 +124,13 @@ export const MapView: React.FC<MapViewProps> = ({
                 <p className="text-xs text-gray-500">
                   Type: {station.type?.charAt(0).toUpperCase() + station.type?.slice(1)}
                 </p>
+                <div className="mt-2 pt-2 border-t text-xs text-gray-500">
+                  {results.filter(r => r.trainStation.id === station.id).length} venues found within {searchRadius}km
+                </div>
               </div>
             </Popup>
           </Marker>
-        )}
+        ))}
 
         {/* Result markers */}
         {results.map((result) => {
@@ -150,8 +160,18 @@ export const MapView: React.FC<MapViewProps> = ({
                     <div className="flex items-center justify-between">
                       <span className="text-gray-600">Distance:</span>
                       <span className="font-medium">
-                        {result.distance.toFixed(1)} km
+                        {result.distance.toFixed(1)} km from station
                       </span>
+                    </div>
+                    
+                    <div className="bg-blue-50 p-2 rounded">
+                      <div className="text-xs text-gray-600">Nearest Station:</div>
+                      <div className="font-medium text-blue-700">
+                        🚂 {result.trainStation.name}
+                      </div>
+                      <div className="text-xs text-gray-500">
+                        {result.trainStation.city}
+                      </div>
                     </div>
                     
                     {result.address && (
@@ -209,7 +229,6 @@ export const MapView: React.FC<MapViewProps> = ({
                     )}
                     
                     <div className="border-t pt-2 text-xs text-gray-500">
-                      <p>From {result.trainStation.name}</p>
                       <p>Data from OpenStreetMap</p>
                     </div>
                   </div>

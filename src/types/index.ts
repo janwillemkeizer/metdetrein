@@ -16,8 +16,8 @@ export interface SearchResult {
   address: string;
   lat: number;
   lng: number;
-  distance: number; // in kilometers
-  trainStation: TrainStation;
+  distance: number; // in kilometers from nearest train station
+  trainStation: TrainStation; // The nearest train station
   rating?: number;
   openingHours?: string;
   phone?: string;
@@ -27,8 +27,7 @@ export interface SearchResult {
 
 export interface SearchFilters {
   query: string;
-  stationId: string;
-  distance: number; // in kilometers
+  distance: number; // maximum distance from any train station in kilometers
   category: string;
 }
 

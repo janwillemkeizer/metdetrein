@@ -33,14 +33,11 @@ export async function getTrainStations(): Promise<TrainStation[]> {
   }
 }
 
-// Search for locations using Overpass API (OpenStreetMap)
+// Search for locations near ANY train station
 export async function searchLocations(filters: SearchFilters): Promise<SearchResult[]> {
   try {
-    const station = dutchTrainStations.find(s => s.id === filters.stationId);
-    if (!station) {
-      throw new Error('Station not found');
-    }
-
+    console.log('Searching for venues near any train station with filters:', filters);
+    
     // Get the amenity tags for the selected category
     const amenityTags = CATEGORY_MAPPING[filters.category] || [];
     if (amenityTags.length === 0 && filters.category !== 'all') {
@@ -48,14 +45,14 @@ export async function searchLocations(filters: SearchFilters): Promise<SearchRes
       return [];
     }
 
-    // Build Overpass QL query
-    const query = buildOverpassQuery(station, filters, amenityTags);
+    // Build Overpass QL query to search around all train stations
+    const query = buildOverpassQueryForAllStations(filters, amenityTags);
     
     // Execute query
     const overpassResult = await executeOverpassQuery(query);
     
-    // Process results
-    const searchResults = processOverpassResults(overpassResult, station, filters);
+    // Process results and find nearest train station for each venue
+    const searchResults = processOverpassResultsWithNearestStation(overpassResult, filters);
     
     return searchResults;
   } catch (error) {
@@ -65,9 +62,8 @@ export async function searchLocations(filters: SearchFilters): Promise<SearchRes
   }
 }
 
-// Build Overpass QL query for fetching POIs around a train station
-function buildOverpassQuery(station: TrainStation, filters: SearchFilters, amenityTags: string[]): string {
-  const { lat, lng } = station;
+// Build Overpass QL query for fetching POIs around ALL train stations
+function buildOverpassQueryForAllStations(filters: SearchFilters, amenityTags: string[]): string {
   const { distance, query, category } = filters;
   
   // Convert km to meters for Overpass API
@@ -94,12 +90,17 @@ function buildOverpassQuery(station: TrainStation, filters: SearchFilters, ameni
     nameFilter = `[~"^name"~"${searchTerm}",i]`;
   }
 
+  // Create a query that searches around all train stations
+  const stationQueries = dutchTrainStations.map(station => {
+    return `
+  node${amenityFilter}${nameFilter}(around:${radiusMeters},${station.lat},${station.lng});
+  way${amenityFilter}${nameFilter}(around:${radiusMeters},${station.lat},${station.lng});
+  relation${amenityFilter}${nameFilter}(around:${radiusMeters},${station.lat},${station.lng});`;
+  }).join('');
+
   const overpassQuery = `
-[out:json][timeout:25];
-(
-  node${amenityFilter}${nameFilter}(around:${radiusMeters},${lat},${lng});
-  way${amenityFilter}${nameFilter}(around:${radiusMeters},${lat},${lng});
-  relation${amenityFilter}${nameFilter}(around:${radiusMeters},${lat},${lng});
+[out:json][timeout:30];
+(${stationQueries}
 );
 out center geom;
   `.trim();
@@ -138,13 +139,13 @@ async function executeOverpassQuery(query: string): Promise<OverpassResult> {
   throw new Error('All Overpass API endpoints failed');
 }
 
-// Process Overpass API results into SearchResult format
-function processOverpassResults(
+// Process Overpass API results and find the nearest train station for each venue
+function processOverpassResultsWithNearestStation(
   overpassResult: OverpassResult, 
-  station: TrainStation, 
   filters: SearchFilters
 ): SearchResult[] {
   const results: SearchResult[] = [];
+  const seenVenues = new Set<string>(); // To avoid duplicates
   
   for (const element of overpassResult.elements) {
     try {
@@ -162,16 +163,23 @@ function processOverpassResults(
         continue; // Skip elements without coordinates
       }
       
-      // Extract name
-      const name = tags.name || tags['name:en'] || tags.brand || `${tags.amenity || 'Location'} #${element.id}`;
+      // Create unique identifier for this venue
+      const venueKey = `${lat.toFixed(6)}-${lng.toFixed(6)}-${element.id}`;
+      if (seenVenues.has(venueKey)) {
+        continue; // Skip duplicates
+      }
+      seenVenues.add(venueKey);
       
-      // Calculate distance from station
-      const distance = calculateDistance(station.lat, station.lng, lat, lng);
+      // Find the nearest train station
+      const { nearestStation, distance } = findNearestTrainStation(lat, lng);
       
-      // Skip if outside the requested radius (with small buffer for rounding)
-      if (distance > filters.distance + 0.1) {
+      // Skip if no station is within the requested distance
+      if (distance > filters.distance) {
         continue;
       }
+      
+      // Extract name
+      const name = tags.name || tags['name:en'] || tags.brand || `${tags.amenity || 'Location'} #${element.id}`;
       
       // Extract category and type
       const amenity = tags.amenity || 'unknown';
@@ -195,7 +203,7 @@ function processOverpassResults(
         lat,
         lng,
         distance,
-        trainStation: station,
+        trainStation: nearestStation,
         rating,
         openingHours,
         phone,
@@ -209,11 +217,27 @@ function processOverpassResults(
     }
   }
   
-  // Sort by distance
+  // Sort by distance from train station
   results.sort((a, b) => a.distance - b.distance);
   
   // Limit results to prevent overwhelming the UI
   return results.slice(0, 100);
+}
+
+// Find the nearest train station to a given coordinate
+function findNearestTrainStation(lat: number, lng: number): { nearestStation: TrainStation; distance: number } {
+  let nearestStation = dutchTrainStations[0];
+  let minDistance = calculateDistance(lat, lng, nearestStation.lat, nearestStation.lng);
+  
+  for (const station of dutchTrainStations) {
+    const distance = calculateDistance(lat, lng, station.lat, station.lng);
+    if (distance < minDistance) {
+      minDistance = distance;
+      nearestStation = station;
+    }
+  }
+  
+  return { nearestStation, distance: minDistance };
 }
 
 // Get category from OSM amenity tag
@@ -261,58 +285,73 @@ function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: numbe
 
 // Fallback demo data for when APIs are unavailable
 function getDemoResults(filters: SearchFilters): SearchResult[] {
-  const station = dutchTrainStations.find(s => s.id === filters.stationId);
-  if (!station) return [];
-
-  const demoData = [
-    {
-      id: 'demo-1',
-      name: 'Albert Heijn',
-      type: 'supermarket',
-      category: 'supermarket',
-      address: 'Stationsplein 1',
-      lat: station.lat + 0.001,
-      lng: station.lng + 0.001,
-      distance: 0.2,
-      trainStation: station,
-      rating: 4.2,
-      openingHours: 'Mo-Sa 08:00-22:00; Su 10:00-20:00'
-    },
-    {
-      id: 'demo-2',
-      name: 'McDonald\'s',
-      type: 'fast_food',
-      category: 'restaurant',
-      address: 'Stationsplein 5',
-      lat: station.lat - 0.001,
-      lng: station.lng + 0.001,
-      distance: 0.3,
-      trainStation: station,
-      rating: 3.8,
-      openingHours: '24/7'
-    },
-    {
-      id: 'demo-3',
-      name: 'Basic-Fit',
-      type: 'fitness_centre',
-      category: 'gym',
-      address: 'Stationsweg 10',
-      lat: station.lat + 0.002,
-      lng: station.lng - 0.001,
-      distance: 0.4,
-      trainStation: station,
-      rating: 4.1,
-      openingHours: 'Mo-Su 06:00-24:00'
+  // Create demo data for multiple stations
+  const demoResults: SearchResult[] = [];
+  
+  // Take a few major stations for demo
+  const majorStations = dutchTrainStations.slice(0, 5);
+  
+  for (const station of majorStations) {
+    const stationResults = [
+      {
+        id: `demo-${station.id}-1`,
+        name: 'Albert Heijn',
+        type: 'supermarket',
+        category: 'supermarket',
+        address: `${station.name} Station Area`,
+        lat: station.lat + 0.001,
+        lng: station.lng + 0.001,
+        distance: 0.2,
+        trainStation: station,
+        rating: 4.2,
+        openingHours: 'Mo-Sa 08:00-22:00; Su 10:00-20:00'
+      },
+      {
+        id: `demo-${station.id}-2`,
+        name: 'McDonald\'s',
+        type: 'fast_food',
+        category: 'restaurant',
+        address: `${station.name} Station Plaza`,
+        lat: station.lat - 0.001,
+        lng: station.lng + 0.001,
+        distance: 0.3,
+        trainStation: station,
+        rating: 3.8,
+        openingHours: '24/7'
+      },
+      {
+        id: `demo-${station.id}-3`,
+        name: 'Basic-Fit',
+        type: 'fitness_centre',
+        category: 'gym',
+        address: `${station.name} Center`,
+        lat: station.lat + 0.002,
+        lng: station.lng - 0.001,
+        distance: 0.4,
+        trainStation: station,
+        rating: 4.1,
+        openingHours: 'Mo-Su 06:00-24:00'
+      }
+    ];
+    
+    demoResults.push(...stationResults);
+  }
+  
+  // Filter by category and query
+  const filteredResults = demoResults.filter(item => {
+    if (filters.category !== 'all' && item.category !== filters.category) {
+      return false;
     }
-  ].filter(item => {
-    if (filters.category === 'all') return true;
-    return item.category === filters.category;
-  }).filter(item => {
-    if (!filters.query.trim()) return true;
-    return item.name.toLowerCase().includes(filters.query.toLowerCase());
+    if (filters.query.trim() && !item.name.toLowerCase().includes(filters.query.toLowerCase())) {
+      return false;
+    }
+    if (item.distance > filters.distance) {
+      return false;
+    }
+    return true;
   });
 
-  return demoData;
+  return filteredResults.sort((a, b) => a.distance - b.distance);
 }
 
 // Enhanced search with multiple data sources

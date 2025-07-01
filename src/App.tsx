@@ -9,7 +9,6 @@ import { searchWithFallback, getTrainStations } from './services/api';
 function App() {
   const [filters, setFilters] = useState<SearchFilters>({
     query: '',
-    stationId: '',
     distance: 2,
     category: 'all'
   });
@@ -26,18 +25,13 @@ function App() {
       try {
         const stationData = await getTrainStations();
         setStations(stationData);
-        // Set default station to Amsterdam Centraal
-        if (stationData.length > 0 && !filters.stationId) {
-          setFilters(prev => ({ ...prev, stationId: stationData[0].id }));
-        }
       } catch (error) {
         console.error('Failed to load train stations:', error);
       }
     };
 
     loadStations();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Only run on mount
+  }, []);
 
   // Monitor online status
   useEffect(() => {
@@ -55,17 +49,13 @@ function App() {
 
   // Handle search
   const handleSearch = async () => {
-    if (!filters.stationId) {
-      alert('Please select a train station first');
-      return;
-    }
-
     setIsLoading(true);
     setSelectedResult(null);
     
     try {
       const searchResults = await searchWithFallback(filters);
       setResults(searchResults);
+      console.log(`Found ${searchResults.length} venues near train stations`);
     } catch (error) {
       console.error('Search failed:', error);
       alert('Search failed. Please try again.');
@@ -79,8 +69,45 @@ function App() {
     setSelectedResult(result);
   };
 
-  // Get current station for map centering
-  const currentStation = stations.find(s => s.id === filters.stationId);
+  // Calculate map center based on results or default to Netherlands center
+  const getMapCenter = (): [number, number] => {
+    if (results.length > 0) {
+      const avgLat = results.reduce((sum, r) => sum + r.lat, 0) / results.length;
+      const avgLng = results.reduce((sum, r) => sum + r.lng, 0) / results.length;
+      return [avgLat, avgLng];
+    }
+    return [52.3676, 4.9041]; // Netherlands center
+  };
+
+  // Calculate map zoom based on results spread
+  const getMapZoom = (): number => {
+    if (results.length === 0) return 7;
+    if (results.length === 1) return 13;
+    
+    // Calculate bounding box of results
+    const lats = results.map(r => r.lat);
+    const lngs = results.map(r => r.lng);
+    const latSpread = Math.max(...lats) - Math.min(...lats);
+    const lngSpread = Math.max(...lngs) - Math.min(...lngs);
+    const maxSpread = Math.max(latSpread, lngSpread);
+    
+    // Zoom level based on spread
+    if (maxSpread > 2) return 6;
+    if (maxSpread > 1) return 7;
+    if (maxSpread > 0.5) return 8;
+    if (maxSpread > 0.2) return 9;
+    if (maxSpread > 0.1) return 10;
+    return 11;
+  };
+
+  // Get unique train stations from results
+  const getUniqueStations = (): TrainStation[] => {
+    const stationMap = new Map<string, TrainStation>();
+    results.forEach(result => {
+      stationMap.set(result.trainStation.id, result.trainStation);
+    });
+    return Array.from(stationMap.values());
+  };
 
   return (
     <div className="min-h-screen bg-gray-50">
@@ -91,8 +118,8 @@ function App() {
             <div className="flex items-center space-x-3">
               <Train className="h-8 w-8 text-ns-yellow" />
               <div>
-                <h1 className="text-xl font-bold">Dutch Train Station Finder</h1>
-                <p className="text-ns-yellow text-sm">Find everything near Dutch train stations</p>
+                <h1 className="text-xl font-bold">Met de Trein</h1>
+                <p className="text-ns-yellow text-sm">Find venues near any Dutch train station</p>
               </div>
             </div>
             
@@ -118,15 +145,12 @@ function App() {
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
           {/* Search Panel */}
           <div className="lg:col-span-1">
-            <div className="bg-white rounded-lg shadow-lg p-6 mb-6">
-              <SearchForm
-                filters={filters}
-                stations={stations}
-                onFiltersChange={setFilters}
-                onSearch={handleSearch}
-                isLoading={isLoading}
-              />
-            </div>
+            <SearchForm
+              filters={filters}
+              onFiltersChange={setFilters}
+              onSearch={handleSearch}
+              isLoading={isLoading}
+            />
 
             {/* Data source information */}
             <div className="bg-white rounded-lg shadow-lg p-4 mb-6">
@@ -134,7 +158,7 @@ function App() {
               <div className="space-y-2 text-xs text-gray-600">
                 <div className="flex items-center justify-between">
                   <span>Train Stations:</span>
-                  <span className="text-green-600 font-medium">NS API Ready</span>
+                  <span className="text-green-600 font-medium">NS Ready ({stations.length})</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span>Locations:</span>
@@ -173,11 +197,12 @@ function App() {
           <div className="lg:col-span-2">
             <div className="bg-white rounded-lg shadow-lg overflow-hidden" style={{ height: '600px' }}>
               <MapView
-                center={currentStation ? [currentStation.lat, currentStation.lng] : [52.3676, 4.9041]}
-                zoom={currentStation ? 13 : 7}
+                center={getMapCenter()}
+                zoom={getMapZoom()}
                 results={results}
                 selectedResult={selectedResult}
-                station={currentStation}
+                stations={getUniqueStations()}
+                searchRadius={filters.distance}
               />
             </div>
             
@@ -187,15 +212,15 @@ function App() {
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-xs">
                 <div className="flex items-center space-x-2">
                   <div className="w-3 h-3 bg-blue-500 rounded-full"></div>
-                  <span>Train Station</span>
+                  <span>Train Stations</span>
                 </div>
                 <div className="flex items-center space-x-2">
                   <div className="w-3 h-3 bg-red-500 rounded-full"></div>
-                  <span>Search Results</span>
+                  <span>Found Venues</span>
                 </div>
                 <div className="flex items-center space-x-2">
                   <div className="w-3 h-3 bg-green-500 rounded-full"></div>
-                  <span>Selected</span>
+                  <span>Selected Venue</span>
                 </div>
                 <div className="flex items-center space-x-2">
                   <div className="w-3 h-3 border-2 border-gray-400 rounded-full"></div>
@@ -212,25 +237,25 @@ function App() {
             <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 text-center">
               <div>
                 <div className="text-2xl font-bold text-ns-blue">{results.length}</div>
-                <div className="text-sm text-gray-600">Results Found</div>
+                <div className="text-sm text-gray-600">Venues Found</div>
+              </div>
+              <div>
+                <div className="text-2xl font-bold text-ns-blue">
+                  {getUniqueStations().length}
+                </div>
+                <div className="text-sm text-gray-600">Train Stations</div>
               </div>
               <div>
                 <div className="text-2xl font-bold text-ns-blue">
                   {Math.min(...results.map(r => r.distance)).toFixed(1)}km
                 </div>
-                <div className="text-sm text-gray-600">Closest Result</div>
+                <div className="text-sm text-gray-600">Closest to Station</div>
               </div>
               <div>
                 <div className="text-2xl font-bold text-ns-blue">
                   {filters.distance}km
                 </div>
-                <div className="text-sm text-gray-600">Search Radius</div>
-              </div>
-              <div>
-                <div className="text-2xl font-bold text-ns-blue">
-                  {currentStation?.city || 'N/A'}
-                </div>
-                <div className="text-sm text-gray-600">Current City</div>
+                <div className="text-sm text-gray-600">Max Distance</div>
               </div>
             </div>
           </div>
@@ -244,32 +269,32 @@ function App() {
             <div>
               <h3 className="text-lg font-semibold mb-4">About</h3>
               <p className="text-sm text-gray-300">
-                Find stores, restaurants, gyms, and other venues near any Dutch train station. 
-                Powered by real-time data from OpenStreetMap and NS API.
+                Find venues near any Dutch train station. Search for McDonald's, Albert Heijn, gyms, 
+                or any other business within walking distance of train stations across the Netherlands.
               </p>
             </div>
             <div>
-              <h3 className="text-lg font-semibold mb-4">Features</h3>
+              <h3 className="text-lg font-semibold mb-4">How It Works</h3>
               <ul className="text-sm text-gray-300 space-y-1">
-                <li>• {stations.length} Dutch train stations</li>
-                <li>• Live location data from OpenStreetMap</li>
-                <li>• Interactive map with custom radius</li>
-                <li>• Category filtering and search</li>
-                <li>• Mobile-responsive design</li>
+                <li>• Search for specific brands or categories</li>
+                <li>• Set your preferred walking distance</li>
+                <li>• See all options near any train station</li>
+                <li>• View locations on interactive map</li>
+                <li>• Get directions and contact info</li>
               </ul>
             </div>
             <div>
               <h3 className="text-lg font-semibold mb-4">Data Sources</h3>
               <ul className="text-sm text-gray-300 space-y-1">
-                <li>• Nederlandse Spoorwegen (NS)</li>
-                <li>• OpenStreetMap Contributors</li>
-                <li>• Overpass API</li>
-                <li>• OpenLayers & Leaflet</li>
+                <li>• {stations.length} Nederlandse Spoorwegen stations</li>
+                <li>• Live OpenStreetMap data</li>
+                <li>• Overpass API integration</li>
+                <li>• Real-time venue information</li>
               </ul>
             </div>
           </div>
           <div className="border-t border-gray-600 mt-8 pt-4 text-center text-sm text-gray-400">
-            <p>&copy; 2025 Dutch Train Station Finder. Built with React, TypeScript, and real Dutch data.</p>
+            <p>&copy; 2025 Met de Trein. Built with React, TypeScript, and real Dutch data.</p>
           </div>
         </div>
       </footer>
