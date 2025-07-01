@@ -25,113 +25,190 @@ const CATEGORY_MAPPING: Record<string, string[]> = {
 // Get all available train stations
 export async function getTrainStations(): Promise<TrainStation[]> {
   try {
-    // In production, you could fetch this from NS API or your own backend
     return dutchTrainStations;
   } catch (error) {
     console.error('Error fetching train stations:', error);
-    return dutchTrainStations; // Fallback to static data
+    return dutchTrainStations;
   }
 }
 
-// Search for locations near ANY train station
+// Optimized search for locations near train stations
 export async function searchLocations(filters: SearchFilters): Promise<SearchResult[]> {
   try {
-    console.log('Searching for venues near any train station with filters:', filters);
+    console.log('🔍 Starting optimized search with filters:', filters);
     
-    // Get the amenity tags for the selected category
-    const amenityTags = CATEGORY_MAPPING[filters.category] || [];
-    if (amenityTags.length === 0 && filters.category !== 'all') {
-      console.warn(`No amenity mapping found for category: ${filters.category}`);
-      return [];
+    // Validate inputs
+    if (!filters.query.trim() && filters.category === 'all') {
+      console.warn('⚠️ Empty search - need either query or category');
+      return getDemoResults(filters);
     }
 
-    // Build Overpass QL query to search around all train stations
-    const query = buildOverpassQueryForAllStations(filters, amenityTags);
+    // Get strategy based on search type
+    const strategy = getSearchStrategy(filters);
+    console.log(`📊 Using search strategy: ${strategy.name} (${strategy.stations.length} stations)`);
+
+    // Execute optimized search
+    const results = await executeOptimizedSearch(filters, strategy);
     
-    // Execute query
-    const overpassResult = await executeOverpassQuery(query);
+    console.log(`✅ Found ${results.length} venues near train stations`);
+    return results;
     
-    // Process results and find nearest train station for each venue
-    const searchResults = processOverpassResultsWithNearestStation(overpassResult, filters);
-    
-    return searchResults;
   } catch (error) {
-    console.error('Error searching locations:', error);
-    // Return demo data as fallback
+    console.error('❌ Search error:', error);
     return getDemoResults(filters);
   }
 }
 
-// Build Overpass QL query for fetching POIs around ALL train stations
-function buildOverpassQueryForAllStations(filters: SearchFilters, amenityTags: string[]): string {
-  const { distance, query, category } = filters;
+// Intelligent search strategy selection
+function getSearchStrategy(filters: SearchFilters): { name: string; stations: TrainStation[] } {
+  const { query, distance } = filters;
   
-  // Convert km to meters for Overpass API
+  // Strategy 1: Text search - use major stations first for performance
+  if (query.trim()) {
+    const majorStations = dutchTrainStations.filter(s => s.type === 'intercity').slice(0, 15);
+    return { name: 'Major Stations Text Search', stations: majorStations };
+  }
+  
+  // Strategy 2: Category only - use more stations but still limited
+  const importantStations = dutchTrainStations.filter(s => 
+    s.type === 'intercity' || s.type === 'regional'
+  ).slice(0, 25);
+  
+  return { name: 'Category Search (Important Stations)', stations: importantStations };
+}
+
+// Execute optimized search with batching
+async function executeOptimizedSearch(
+  filters: SearchFilters, 
+  strategy: { name: string; stations: TrainStation[] }
+): Promise<SearchResult[]> {
+  const BATCH_SIZE = 8; // Process stations in smaller batches
+  const allResults: SearchResult[] = [];
+  const seenVenues = new Set<string>();
+
+  // Process stations in batches to avoid overwhelming the API
+  for (let i = 0; i < strategy.stations.length; i += BATCH_SIZE) {
+    const batch = strategy.stations.slice(i, i + BATCH_SIZE);
+    console.log(`🔄 Processing batch ${Math.floor(i/BATCH_SIZE) + 1}/${Math.ceil(strategy.stations.length/BATCH_SIZE)} (${batch.length} stations)`);
+    
+    try {
+      const batchResults = await searchAroundStationBatch(filters, batch);
+      
+      // Deduplicate results
+      for (const result of batchResults) {
+        const venueKey = `${result.lat.toFixed(6)}-${result.lng.toFixed(6)}`;
+        if (!seenVenues.has(venueKey)) {
+          seenVenues.add(venueKey);
+          allResults.push(result);
+        }
+      }
+      
+      // Add small delay between batches to be respectful to the API
+      if (i + BATCH_SIZE < strategy.stations.length) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
+    } catch (error) {
+      console.warn(`⚠️ Batch ${Math.floor(i/BATCH_SIZE) + 1} failed:`, error);
+      // Continue with next batch
+    }
+  }
+
+  // Sort by distance and limit results
+  allResults.sort((a, b) => a.distance - b.distance);
+  return allResults.slice(0, 50); // Reasonable limit for UI
+}
+
+// Search around a batch of train stations
+async function searchAroundStationBatch(
+  filters: SearchFilters, 
+  stations: TrainStation[]
+): Promise<SearchResult[]> {
+  
+  const query = buildOptimizedOverpassQuery(filters, stations);
+  console.log(`🌐 Executing Overpass query for ${stations.length} stations`);
+  
+  const overpassResult = await executeOverpassQuery(query);
+  return processOverpassResults(overpassResult, filters, stations);
+}
+
+// Build optimized Overpass query
+function buildOptimizedOverpassQuery(filters: SearchFilters, stations: TrainStation[]): string {
+  const { distance, query, category } = filters;
   const radiusMeters = distance * 1000;
   
+  // Build proper amenity filter with OR logic
   let amenityFilter = '';
-  
-  if (category === 'all') {
-    // Get all amenities
-    amenityFilter = '[amenity]';
-  } else if (amenityTags.length > 0) {
-    // Create OR condition for specific amenities
-    const tagConditions = amenityTags.map(tag => `[amenity=${tag}]`).join('');
-    amenityFilter = tagConditions;
+  if (category !== 'all') {
+    const amenityTags = CATEGORY_MAPPING[category] || [];
+    if (amenityTags.length > 0) {
+      // Use proper OR syntax: [amenity~"^(restaurant|fast_food|cafe)$"]
+      const tagPattern = amenityTags.join('|');
+      amenityFilter = `[amenity~"^(${tagPattern})$"]`;
+    }
   } else {
-    // Search in name and tags if no specific category
     amenityFilter = '[amenity]';
   }
   
-  // Add text search if query is provided
+  // Build name filter with proper regex
   let nameFilter = '';
   if (query.trim()) {
     const searchTerm = query.trim().toLowerCase();
-    nameFilter = `[~"^name"~"${searchTerm}",i]`;
+    // Search in multiple name fields with proper OR logic
+    nameFilter = `[~"^(name|name:en|brand)$"~"${searchTerm}",i]`;
   }
+  
+  // Create efficient union query for multiple stations
+  const stationQueries = stations.map(station => {
+    return `(
+    node${amenityFilter}${nameFilter}(around:${radiusMeters},${station.lat},${station.lng});
+    way${amenityFilter}${nameFilter}(around:${radiusMeters},${station.lat},${station.lng});
+  )`;
+  }).join(';');
 
-  // Create a query that searches around all train stations
-  const stationQueries = dutchTrainStations.map(station => {
-    return `
-  node${amenityFilter}${nameFilter}(around:${radiusMeters},${station.lat},${station.lng});
-  way${amenityFilter}${nameFilter}(around:${radiusMeters},${station.lat},${station.lng});
-  relation${amenityFilter}${nameFilter}(around:${radiusMeters},${station.lat},${station.lng});`;
-  }).join('');
-
-  const overpassQuery = `
-[out:json][timeout:30];
-(${stationQueries}
+  return `
+[out:json][timeout:25];
+(
+  ${stationQueries};
 );
-out center geom;
+out center meta;
   `.trim();
-
-  return overpassQuery;
 }
 
-// Execute Overpass API query with fallback
+// Execute Overpass API query with improved error handling
 async function executeOverpassQuery(query: string): Promise<OverpassResult> {
   const urls = [OVERPASS_API_URL, BACKUP_OVERPASS_URL];
   
   for (const url of urls) {
     try {
+      console.log(`🌍 Trying ${url}...`);
+      
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 25000); // 25s timeout
+      
       const response = await fetch(url, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
         },
         body: `data=${encodeURIComponent(query)}`,
+        signal: controller.signal
       });
+
+      clearTimeout(timeoutId);
 
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
 
       const result: OverpassResult = await response.json();
+      console.log(`✅ API success: ${result.elements?.length || 0} elements`);
       return result;
+      
     } catch (error) {
-      console.warn(`Overpass API request failed for ${url}:`, error);
+      console.warn(`❌ ${url} failed:`, error instanceof Error ? error.message : error);
       if (url === urls[urls.length - 1]) {
-        throw error; // Throw on last attempt
+        throw new Error(`All Overpass API endpoints failed. Last error: ${error}`);
       }
     }
   }
@@ -139,13 +216,18 @@ async function executeOverpassQuery(query: string): Promise<OverpassResult> {
   throw new Error('All Overpass API endpoints failed');
 }
 
-// Process Overpass API results and find the nearest train station for each venue
-function processOverpassResultsWithNearestStation(
+// Process results with improved logic
+function processOverpassResults(
   overpassResult: OverpassResult, 
-  filters: SearchFilters
+  filters: SearchFilters,
+  searchStations: TrainStation[]
 ): SearchResult[] {
+  if (!overpassResult.elements) {
+    console.warn('⚠️ No elements in Overpass result');
+    return [];
+  }
+
   const results: SearchResult[] = [];
-  const seenVenues = new Set<string>(); // To avoid duplicates
   
   for (const element of overpassResult.elements) {
     try {
@@ -160,37 +242,33 @@ function processOverpassResultsWithNearestStation(
         lat = element.center.lat;
         lng = element.center.lon;
       } else {
-        continue; // Skip elements without coordinates
+        continue;
       }
       
-      // Create unique identifier for this venue
-      const venueKey = `${lat.toFixed(6)}-${lng.toFixed(6)}-${element.id}`;
-      if (seenVenues.has(venueKey)) {
-        continue; // Skip duplicates
-      }
-      seenVenues.add(venueKey);
-      
-      // Find the nearest train station
+      // Find nearest train station from all stations (not just search batch)
       const { nearestStation, distance } = findNearestTrainStation(lat, lng);
       
-      // Skip if no station is within the requested distance
+      // Apply distance filter
       if (distance > filters.distance) {
         continue;
       }
       
-      // Extract name
-      const name = tags.name || tags['name:en'] || tags.brand || `${tags.amenity || 'Location'} #${element.id}`;
+      // Extract and validate name
+      const name = tags.name || tags['name:en'] || tags.brand || tags['operator'] || 'Unnamed Location';
+      if (name === 'Unnamed Location' && filters.query.trim()) {
+        continue; // Skip unnamed locations when searching by name
+      }
       
       // Extract category and type
       const amenity = tags.amenity || 'unknown';
       const category = getCategoryFromAmenity(amenity);
       
-      // Extract address
+      // Build better address
       const address = buildAddress(tags);
       
-      // Extract other useful information
+      // Extract additional info
       const rating = parseFloat(tags.rating || '') || undefined;
-      const openingHours = tags.opening_hours || undefined;
+      const openingHours = formatOpeningHours(tags.opening_hours);
       const phone = tags.phone || tags['contact:phone'] || undefined;
       const website = tags.website || tags['contact:website'] || undefined;
       
@@ -212,19 +290,16 @@ function processOverpassResultsWithNearestStation(
       };
       
       results.push(result);
+      
     } catch (error) {
-      console.warn('Error processing element:', element, error);
+      console.warn('⚠️ Error processing element:', error);
     }
   }
   
-  // Sort by distance from train station
-  results.sort((a, b) => a.distance - b.distance);
-  
-  // Limit results to prevent overwhelming the UI
-  return results.slice(0, 100);
+  return results;
 }
 
-// Find the nearest train station to a given coordinate
+// Find nearest train station (optimized)
 function findNearestTrainStation(lat: number, lng: number): { nearestStation: TrainStation; distance: number } {
   let nearestStation = dutchTrainStations[0];
   let minDistance = calculateDistance(lat, lng, nearestStation.lat, nearestStation.lng);
@@ -240,7 +315,7 @@ function findNearestTrainStation(lat: number, lng: number): { nearestStation: Tr
   return { nearestStation, distance: minDistance };
 }
 
-// Get category from OSM amenity tag
+// Improved category mapping
 function getCategoryFromAmenity(amenity: string): string {
   for (const [category, amenities] of Object.entries(CATEGORY_MAPPING)) {
     if (amenities.includes(amenity)) {
@@ -250,29 +325,42 @@ function getCategoryFromAmenity(amenity: string): string {
   return 'other';
 }
 
-// Build address from OSM tags
+// Improved address building
 function buildAddress(tags: Record<string, string>): string {
   const parts: string[] = [];
   
-  if (tags['addr:housenumber']) {
-    parts.push(tags['addr:housenumber']);
-  }
-  if (tags['addr:street']) {
-    parts.push(tags['addr:street']);
-  }
-  if (tags['addr:city']) {
-    parts.push(tags['addr:city']);
-  }
-  if (tags['addr:postcode']) {
-    parts.push(tags['addr:postcode']);
+  // Try different address formats
+  const street = tags['addr:street'] || tags.street;
+  const housenumber = tags['addr:housenumber'] || tags.housenumber;
+  const city = tags['addr:city'] || tags.city;
+  const postcode = tags['addr:postcode'] || tags.postcode;
+  
+  if (housenumber && street) {
+    parts.push(`${street} ${housenumber}`);
+  } else if (street) {
+    parts.push(street);
   }
   
-  return parts.join(', ') || 'Address not available';
+  if (city) parts.push(city);
+  if (postcode) parts.push(postcode);
+  
+  return parts.length > 0 ? parts.join(', ') : 'Address not available';
 }
 
-// Calculate distance between two coordinates using Haversine formula
+// Format opening hours for better display
+function formatOpeningHours(hours?: string): string | undefined {
+  if (!hours) return undefined;
+  
+  // Simple formatting for common patterns
+  if (hours === '24/7') return '24/7';
+  if (hours.length > 50) return hours.substring(0, 47) + '...';
+  
+  return hours;
+}
+
+// Calculate distance using Haversine formula
 function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: number): number {
-  const R = 6371; // Earth's radius in kilometers
+  const R = 6371;
   const dLat = (lat2 - lat1) * Math.PI / 180;
   const dLng = (lng2 - lng1) * Math.PI / 180;
   const a = 
@@ -283,91 +371,83 @@ function calculateDistance(lat1: number, lng1: number, lat2: number, lng2: numbe
   return R * c;
 }
 
-// Fallback demo data for when APIs are unavailable
+// Enhanced demo data for testing
 function getDemoResults(filters: SearchFilters): SearchResult[] {
-  // Create demo data for multiple stations
-  const demoResults: SearchResult[] = [];
+  console.log('🎭 Using demo data fallback');
   
-  // Take a few major stations for demo
-  const majorStations = dutchTrainStations.slice(0, 5);
+  const demoResults: SearchResult[] = [];
+  const majorStations = dutchTrainStations.slice(0, 8); // More stations for better demo
   
   for (const station of majorStations) {
     const stationResults = [
       {
         id: `demo-${station.id}-1`,
-        name: 'Albert Heijn',
-        type: 'supermarket',
-        category: 'supermarket',
-        address: `${station.name} Station Area`,
-        lat: station.lat + 0.001,
-        lng: station.lng + 0.001,
-        distance: 0.2,
-        trainStation: station,
-        rating: 4.2,
-        openingHours: 'Mo-Sa 08:00-22:00; Su 10:00-20:00'
-      },
-      {
-        id: `demo-${station.id}-2`,
         name: 'McDonald\'s',
         type: 'fast_food',
         category: 'restaurant',
-        address: `${station.name} Station Plaza`,
-        lat: station.lat - 0.001,
-        lng: station.lng + 0.001,
-        distance: 0.3,
+        address: `Stationsplein 1, ${station.city}`,
+        lat: station.lat + (Math.random() - 0.5) * 0.004,
+        lng: station.lng + (Math.random() - 0.5) * 0.004,
+        distance: 0.1 + Math.random() * 0.8,
         trainStation: station,
-        rating: 3.8,
-        openingHours: '24/7'
+        rating: 3.5 + Math.random() * 1.5,
+        openingHours: '06:00-24:00'
+      },
+      {
+        id: `demo-${station.id}-2`,
+        name: 'Albert Heijn',
+        type: 'supermarket',
+        category: 'supermarket',
+        address: `Stationsweg 5, ${station.city}`,
+        lat: station.lat + (Math.random() - 0.5) * 0.004,
+        lng: station.lng + (Math.random() - 0.5) * 0.004,
+        distance: 0.1 + Math.random() * 0.8,
+        trainStation: station,
+        rating: 4.0 + Math.random() * 1.0,
+        openingHours: 'Mo-Sa 08:00-22:00'
       },
       {
         id: `demo-${station.id}-3`,
-        name: 'Basic-Fit',
-        type: 'fitness_centre',
-        category: 'gym',
-        address: `${station.name} Center`,
-        lat: station.lat + 0.002,
-        lng: station.lng - 0.001,
-        distance: 0.4,
+        name: 'Starbucks',
+        type: 'cafe',
+        category: 'restaurant',
+        address: `Station ${station.name}`,
+        lat: station.lat + (Math.random() - 0.5) * 0.003,
+        lng: station.lng + (Math.random() - 0.5) * 0.003,
+        distance: 0.05 + Math.random() * 0.3,
         trainStation: station,
-        rating: 4.1,
-        openingHours: 'Mo-Su 06:00-24:00'
+        rating: 4.2 + Math.random() * 0.8,
+        openingHours: '06:00-20:00'
       }
     ];
     
     demoResults.push(...stationResults);
   }
   
-  // Filter by category and query
-  const filteredResults = demoResults.filter(item => {
-    if (filters.category !== 'all' && item.category !== filters.category) {
-      return false;
-    }
-    if (filters.query.trim() && !item.name.toLowerCase().includes(filters.query.toLowerCase())) {
-      return false;
-    }
-    if (item.distance > filters.distance) {
-      return false;
-    }
+  // Apply filters to demo data
+  const filtered = demoResults.filter(item => {
+    if (filters.category !== 'all' && item.category !== filters.category) return false;
+    if (filters.query.trim() && !item.name.toLowerCase().includes(filters.query.toLowerCase())) return false;
+    if (item.distance > filters.distance) return false;
     return true;
   });
 
-  return filteredResults.sort((a, b) => a.distance - b.distance);
+  return filtered.sort((a, b) => a.distance - b.distance).slice(0, 30);
 }
 
-// Enhanced search with multiple data sources
+// Main search function with fallback
 export async function searchWithFallback(filters: SearchFilters): Promise<SearchResult[]> {
   try {
-    // Try primary search with real data
     const results = await searchLocations(filters);
     
     if (results.length === 0) {
-      console.info('No results from primary search, falling back to demo data');
+      console.info('🎭 No real results found, using demo data');
       return getDemoResults(filters);
     }
     
     return results;
   } catch (error) {
-    console.error('Primary search failed, using demo data:', error);
+    console.error('❌ Search completely failed:', error);
     return getDemoResults(filters);
   }
 }

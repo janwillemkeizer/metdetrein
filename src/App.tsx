@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Train, MapPin, ExternalLink, Wifi } from 'lucide-react';
+import { Train, MapPin, ExternalLink, Wifi, AlertTriangle, CheckCircle } from 'lucide-react';
 import { SearchForm } from './components/SearchForm';
 import { ResultsList } from './components/ResultsList';
 import { MapView } from './components/MapView';
@@ -18,6 +18,8 @@ function App() {
   const [selectedResult, setSelectedResult] = useState<SearchResult | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [searchError, setSearchError] = useState<string | null>(null);
+  const [lastSearchTime, setLastSearchTime] = useState<Date | null>(null);
 
   // Load train stations on component mount
   useEffect(() => {
@@ -25,6 +27,7 @@ function App() {
       try {
         const stationData = await getTrainStations();
         setStations(stationData);
+        console.log(`✅ Loaded ${stationData.length} train stations`);
       } catch (error) {
         console.error('Failed to load train stations:', error);
       }
@@ -47,18 +50,32 @@ function App() {
     };
   }, []);
 
-  // Handle search
+  // Handle search with improved error handling
   const handleSearch = async () => {
+    const startTime = Date.now();
     setIsLoading(true);
     setSelectedResult(null);
+    setSearchError(null);
     
     try {
+      console.log('🚀 Starting search with filters:', filters);
+      
       const searchResults = await searchWithFallback(filters);
+      const duration = Date.now() - startTime;
+      
       setResults(searchResults);
-      console.log(`Found ${searchResults.length} venues near train stations`);
+      setLastSearchTime(new Date());
+      
+      console.log(`✅ Search completed in ${duration}ms - Found ${searchResults.length} venues`);
+      
+      if (searchResults.length === 0) {
+        setSearchError('No venues found with your search criteria. Try adjusting your search terms or increasing the distance.');
+      }
+      
     } catch (error) {
-      console.error('Search failed:', error);
-      alert('Search failed. Please try again.');
+      console.error('❌ Search failed:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Search failed unexpectedly';
+      setSearchError(`Search failed: ${errorMessage}`);
     } finally {
       setIsLoading(false);
     }
@@ -67,6 +84,7 @@ function App() {
   // Handle result selection
   const handleResultClick = (result: SearchResult) => {
     setSelectedResult(result);
+    console.log('📍 Selected venue:', result.name, 'near', result.trainStation.name);
   };
 
   // Calculate map center based on results or default to Netherlands center
@@ -107,6 +125,16 @@ function App() {
       stationMap.set(result.trainStation.id, result.trainStation);
     });
     return Array.from(stationMap.values());
+  };
+
+  // Get search status message
+  const getSearchStatus = () => {
+    if (isLoading) return null;
+    if (searchError) return searchError;
+    if (results.length > 0) {
+      return `Found ${results.length} venues near ${getUniqueStations().length} train stations`;
+    }
+    return null;
   };
 
   return (
@@ -152,6 +180,33 @@ function App() {
               isLoading={isLoading}
             />
 
+            {/* Search Status */}
+            {getSearchStatus() && (
+              <div className={`mb-6 p-4 rounded-lg flex items-start space-x-2 ${
+                searchError 
+                  ? 'bg-red-50 border border-red-200' 
+                  : 'bg-green-50 border border-green-200'
+              }`}>
+                {searchError ? (
+                  <AlertTriangle className="w-5 h-5 text-red-600 mt-0.5 flex-shrink-0" />
+                ) : (
+                  <CheckCircle className="w-5 h-5 text-green-600 mt-0.5 flex-shrink-0" />
+                )}
+                <div>
+                  <p className={`text-sm font-medium ${
+                    searchError ? 'text-red-800' : 'text-green-800'
+                  }`}>
+                    {getSearchStatus()}
+                  </p>
+                  {lastSearchTime && !searchError && (
+                    <p className="text-xs text-green-600 mt-1">
+                      Last updated: {lastSearchTime.toLocaleTimeString()}
+                    </p>
+                  )}
+                </div>
+              </div>
+            )}
+
             {/* Data source information */}
             <div className="bg-white rounded-lg shadow-lg p-4 mb-6">
               <h3 className="text-sm font-semibold text-gray-700 mb-2">Data Sources</h3>
@@ -161,8 +216,8 @@ function App() {
                   <span className="text-green-600 font-medium">NS Ready ({stations.length})</span>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span>Locations:</span>
-                  <span className="text-green-600 font-medium">OpenStreetMap</span>
+                  <span>Venues:</span>
+                  <span className="text-green-600 font-medium">OpenStreetMap Live</span>
                 </div>
                 <div className="flex items-center justify-between">
                   <span>Status:</span>
