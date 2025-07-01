@@ -1,5 +1,5 @@
 import React, { useEffect, useRef } from 'react';
-import { MapContainer, TileLayer, Marker, Popup, useMap } from 'react-leaflet';
+import { MapContainer, TileLayer, Marker, Popup, Circle, useMap } from 'react-leaflet';
 import L from 'leaflet';
 import { SearchResult, TrainStation } from '../types';
 
@@ -30,15 +30,25 @@ const resultIcon = new L.Icon({
   shadowSize: [41, 41]
 });
 
+const selectedIcon = new L.Icon({
+  iconUrl: 'https://raw.githubusercontent.com/pointhi/leaflet-color-markers/master/img/marker-icon-2x-green.png',
+  shadowUrl: 'https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.7.1/images/marker-shadow.png',
+  iconSize: [25, 41],
+  iconAnchor: [12, 41],
+  popupAnchor: [1, -34],
+  shadowSize: [41, 41]
+});
+
 interface MapViewProps {
+  center: [number, number];
+  zoom: number;
   results: SearchResult[];
-  selectedStation: TrainStation | null;
-  selectedResult: SearchResult | null;
-  onResultClick: (result: SearchResult) => void;
+  selectedResult?: SearchResult | null;
+  station?: TrainStation | null;
 }
 
-// Component to handle map center updates
-const MapController: React.FC<{ center: [number, number], zoom: number }> = ({ center, zoom }) => {
+// Component to update map view when center changes
+function ChangeView({ center, zoom }: { center: [number, number]; zoom: number }) {
   const map = useMap();
   
   useEffect(() => {
@@ -46,116 +56,168 @@ const MapController: React.FC<{ center: [number, number], zoom: number }> = ({ c
   }, [map, center, zoom]);
   
   return null;
-};
+}
 
-export const MapView: React.FC<MapViewProps> = ({
-  results,
-  selectedStation,
-  selectedResult,
-  onResultClick
+export const MapView: React.FC<MapViewProps> = ({ 
+  center, 
+  zoom, 
+  results, 
+  selectedResult, 
+  station 
 }) => {
-  const mapRef = useRef<L.Map>(null);
+  const mapRef = useRef<L.Map | null>(null);
 
-  // Default to center of Netherlands
-  const defaultCenter: [number, number] = [52.3676, 4.9041];
-  const defaultZoom = 7;
-
-  // Calculate map center and zoom based on results and selected station
-  const getMapCenterAndZoom = (): { center: [number, number], zoom: number } => {
-    if (selectedResult) {
-      return {
-        center: [selectedResult.lat, selectedResult.lng],
-        zoom: 15
-      };
-    }
-    
-    if (selectedStation) {
-      return {
-        center: [selectedStation.lat, selectedStation.lng],
-        zoom: results.length > 0 ? 13 : 11
-      };
-    }
-    
-    return {
-      center: defaultCenter,
-      zoom: defaultZoom
-    };
-  };
-
-  const { center, zoom } = getMapCenterAndZoom();
+  // Calculate search radius for circle display
+  const searchRadius = 2000; // Default 2km, should be passed from filters
 
   return (
-    <div className="bg-white rounded-lg shadow-lg overflow-hidden h-96">
+    <div className="h-full w-full">
       <MapContainer
-        ref={mapRef}
         center={center}
         zoom={zoom}
-        style={{ height: '100%', width: '100%' }}
-        className="rounded-lg"
+        scrollWheelZoom={true}
+        className="h-full w-full rounded-lg"
+        ref={mapRef}
       >
+        <ChangeView center={center} zoom={zoom} />
+        
+        {/* Base map tiles */}
         <TileLayer
           attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
           url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
         />
-        
-        <MapController center={center} zoom={zoom} />
-        
-        {/* Train Station Marker */}
-        {selectedStation && (
-          <Marker 
-            position={[selectedStation.lat, selectedStation.lng]} 
-            icon={stationIcon}
-          >
+
+        {/* Search radius circle */}
+        {station && (
+          <Circle
+            center={[station.lat, station.lng]}
+            radius={searchRadius}
+            pathOptions={{
+              color: '#3b82f6',
+              fillColor: '#3b82f6',
+              fillOpacity: 0.1,
+              weight: 2,
+              dashArray: '5, 5'
+            }}
+          />
+        )}
+
+        {/* Train station marker */}
+        {station && (
+          <Marker position={[station.lat, station.lng]} icon={stationIcon}>
             <Popup>
               <div className="text-center">
-                <h3 className="font-semibold text-ns-blue">{selectedStation.name}</h3>
-                <p className="text-sm text-gray-600">{selectedStation.city}</p>
-                <p className="text-xs text-gray-500">Train Station</p>
+                <h3 className="font-semibold text-lg text-blue-600">
+                  🚂 {station.name}
+                </h3>
+                <p className="text-sm text-gray-600 mb-2">{station.city}</p>
+                <p className="text-xs text-gray-500">
+                  Station Code: {station.code}
+                </p>
+                <p className="text-xs text-gray-500">
+                  Type: {station.type?.charAt(0).toUpperCase() + station.type?.slice(1)}
+                </p>
               </div>
             </Popup>
           </Marker>
         )}
-        
-        {/* Result Markers */}
-        {results.map((result) => (
-          <Marker
-            key={result.id}
-            position={[result.lat, result.lng]}
-            icon={resultIcon}
-            eventHandlers={{
-              click: () => onResultClick(result)
-            }}
-          >
-            <Popup>
-              <div className="min-w-48">
-                <h3 className="font-semibold text-gray-900 mb-1">{result.name}</h3>
-                <p className="text-sm text-gray-600 mb-2">{result.type}</p>
-                <p className="text-xs text-gray-500 mb-2">{result.address}</p>
-                
-                <div className="space-y-1 text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-gray-500">Distance:</span>
-                    <span className="font-medium">{result.distance} km</span>
+
+        {/* Result markers */}
+        {results.map((result) => {
+          const isSelected = selectedResult?.id === result.id;
+          const icon = isSelected ? selectedIcon : resultIcon;
+          
+          return (
+            <Marker
+              key={result.id}
+              position={[result.lat, result.lng]}
+              icon={icon}
+            >
+              <Popup>
+                <div className="max-w-xs">
+                  <h3 className="font-semibold text-lg mb-2">
+                    {result.name}
+                  </h3>
+                  
+                  <div className="space-y-2 text-sm">
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-600">Category:</span>
+                      <span className="capitalize font-medium text-blue-600">
+                        {result.category}
+                      </span>
+                    </div>
+                    
+                    <div className="flex items-center justify-between">
+                      <span className="text-gray-600">Distance:</span>
+                      <span className="font-medium">
+                        {result.distance.toFixed(1)} km
+                      </span>
+                    </div>
+                    
+                    {result.address && (
+                      <div className="border-t pt-2">
+                        <span className="text-gray-600 text-xs">Address:</span>
+                        <p className="text-xs mt-1">{result.address}</p>
+                      </div>
+                    )}
+                    
+                    {result.rating && (
+                      <div className="flex items-center justify-between">
+                        <span className="text-gray-600">Rating:</span>
+                        <span className="font-medium">
+                          ⭐ {result.rating.toFixed(1)}
+                        </span>
+                      </div>
+                    )}
+                    
+                    {result.openingHours && (
+                      <div className="border-t pt-2">
+                        <span className="text-gray-600 text-xs">Hours:</span>
+                        <p className="text-xs mt-1 font-mono">
+                          {result.openingHours}
+                        </p>
+                      </div>
+                    )}
+                    
+                    {(result.phone || result.website) && (
+                      <div className="border-t pt-2 space-y-1">
+                        {result.phone && (
+                          <div className="flex items-center space-x-2">
+                            <span className="text-xs text-gray-600">📞</span>
+                            <a 
+                              href={`tel:${result.phone}`}
+                              className="text-xs text-blue-600 hover:underline"
+                            >
+                              {result.phone}
+                            </a>
+                          </div>
+                        )}
+                        {result.website && (
+                          <div className="flex items-center space-x-2">
+                            <span className="text-xs text-gray-600">🌐</span>
+                            <a 
+                              href={result.website}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-xs text-blue-600 hover:underline"
+                            >
+                              Website
+                            </a>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                    
+                    <div className="border-t pt-2 text-xs text-gray-500">
+                      <p>From {result.trainStation.name}</p>
+                      <p>Data from OpenStreetMap</p>
+                    </div>
                   </div>
-                  
-                  {result.rating && (
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">Rating:</span>
-                      <span className="font-medium">⭐ {result.rating}</span>
-                    </div>
-                  )}
-                  
-                  {result.openingHours && (
-                    <div className="flex justify-between">
-                      <span className="text-gray-500">Hours:</span>
-                      <span className="font-medium text-green-600">{result.openingHours}</span>
-                    </div>
-                  )}
                 </div>
-              </div>
-            </Popup>
-          </Marker>
-        ))}
+              </Popup>
+            </Marker>
+          );
+        })}
       </MapContainer>
     </div>
   );

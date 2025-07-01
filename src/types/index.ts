@@ -5,12 +5,14 @@ export interface TrainStation {
   lat: number;
   lng: number;
   city: string;
+  type: 'intercity' | 'regional' | 'local';
 }
 
 export interface SearchResult {
   id: string;
   name: string;
   type: string;
+  category: string; // e.g., 'restaurant', 'supermarket', 'gym', 'pharmacy'
   address: string;
   lat: number;
   lng: number;
@@ -18,6 +20,9 @@ export interface SearchResult {
   trainStation: TrainStation;
   rating?: number;
   openingHours?: string;
+  phone?: string;
+  website?: string;
+  tags?: Record<string, string>; // OSM tags
 }
 
 export interface SearchFilters {
@@ -25,4 +30,15 @@ export interface SearchFilters {
   stationId: string;
   distance: number; // in kilometers
   category: string;
+}
+
+export interface OverpassResult {
+  elements: Array<{
+    type: 'node' | 'way' | 'relation';
+    id: number;
+    lat?: number;
+    lon?: number;
+    center?: { lat: number; lon: number };
+    tags?: Record<string, string>;
+  }>;
 }
