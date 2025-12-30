@@ -1,3 +1,3 @@
 # metdetrein
 
-Vibe code project to work with background agents on Github.
+Project to work with background agents on Github.
